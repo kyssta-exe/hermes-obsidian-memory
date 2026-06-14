@@ -441,8 +441,13 @@
         fetchJSON(BASE + "/folders" + q),
         fetchJSON(BASE + "/tags" + q),
         fetchJSON(BASE + "/graph" + q),
-      ]).then(([n,f,t,g]) => { setNotes(n); setFolders(f); setTags(t); setGraph(g); setLoading(false); setSelected(null); setContent(null); setEditing(false); })
-        .catch(e => { console.error("[obsidian]",e); setLoading(false); });
+      ])
+        .then(([n,f,t,g]) => { setNotes(n); setFolders(f); setTags(t); setGraph(g); setLoading(false); setSelected(null); setContent(null); setEditing(false); })
+        .catch(e => {
+          console.error("[obsidian]", e);
+          setNotes([]); setFolders([]); setTags([]); setGraph({ nodes: [], edges: [] });
+          setSelected(null); setContent(null); setEditing(false); setLoading(false);
+        });
     }, [currentVault]);
 
     useEffect(() => { loadAll(); }, [loadAll]);
@@ -501,8 +506,11 @@
           vaults.length > 1 && React.createElement("select", {
             className: "vault-select",
             value: currentVault || "",
-            onChange: e => { setCurrentVault(e.target.value); setSelected(null); setContent(null); },
-          }, vaults.map(v => React.createElement("option", { key: v.name, value: v.name }, v.name + " (" + (v.note_count || "?") + " notes)")))
+            onChange: e => {
+              setCurrentVault(e.target.value); setSelected(null); setContent(null); setEditing(false);
+              setSearch(""); setAFolder(null); setATag(null);
+            },
+          }, vaults.map(v => React.createElement("option", { key: v.name, value: v.name }, v.name + " (" + (v.note_count ?? "?") + " notes)")))
         ),
         React.createElement("div", { style: { display: "flex", gap: 6, alignItems: "center" } },
           React.createElement("span", { style: { fontSize: 12, color: TEXT_DIM } },
@@ -526,11 +534,14 @@
               React.createElement("div", { style: { width: 240, flexShrink: 0, overflow: "auto", border: "1px solid "+BORDER, borderRadius: 8, background: SURFACE } },
                 filtered.length === 0
                   ? React.createElement("p", { style: { padding: 16, fontSize: 12, color: TEXT_DIM, textAlign: "center" } }, "No notes found")
-                  : filtered.map(n => React.createElement("div", { key:n.name, onClick:()=>setSelected(n.name), style:{padding:"8px 10px",borderBottom:"1px solid "+BORDER,cursor:"pointer",background:selected===n.name?"rgba(168,230,25,.08)":"transparent",transition:"background .15s"} },
-                      React.createElement("div", { style:{fontWeight:600,fontSize:12,color:selected===n.name?ACCENT:TEXT} }, n.name),
+                  : filtered.map(n => {
+                    const noteId = n.id || n.path || n.name;
+                    return React.createElement("div", { key:noteId, onClick:()=>setSelected(noteId), style:{padding:"8px 10px",borderBottom:"1px solid "+BORDER,cursor:"pointer",background:selected===noteId?"rgba(168,230,25,.08)":"transparent",transition:"background .15s"} },
+                      React.createElement("div", { style:{fontWeight:600,fontSize:12,color:selected===noteId?ACCENT:TEXT} }, n.name),
                       React.createElement("div", { style:{fontSize:10,color:TEXT_DIM,marginTop:2} }, n.folder+" \u00b7 "+n.word_count+" words \u00b7 "+n.link_count+" links"),
                       n.tags.length>0 && React.createElement("div", { style:{display:"flex",gap:3,marginTop:3,flexWrap:"wrap"} }, n.tags.slice(0,3).map(t => React.createElement("span", { key:t, style:{fontSize:9,padding:"1px 5px",border:"1px solid "+BORDER,borderRadius:3,color:TEXT_DIM} }, "#"+t)))
-                    ))
+                    );
+                  })
               ),
               React.createElement("div", { ref:viewerRef, style:{flex:1,overflow:"auto",border:"1px solid "+BORDER,borderRadius:8,padding:16,background:SURFACE} },
                 content ? React.createElement("div", null,

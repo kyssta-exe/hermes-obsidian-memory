@@ -120,11 +120,18 @@ def _scan_vault(vault_path: Path) -> dict[str, NoteInfo]:
             content=content,
             word_count=len(content.split()),
         )
-        notes[md_file.stem] = note
-    for name, note in notes.items():
+        # Key by vault-relative path, not filename stem. Real vaults often have
+        # repeated note names in different folders (README.md, Overview.md,
+        # mirrored service/index notes). Stem keys make notes disappear and
+        # make clicks open the wrong file.
+        notes[str(rel)] = note
+    by_stem: dict[str, list[str]] = {}
+    for key, note in notes.items():
+        by_stem.setdefault(note.name, []).append(key)
+    for key, note in notes.items():
         for link in note.links:
-            if link in notes:
-                notes[link].backlinks.append(name)
+            for target in by_stem.get(link, []):
+                notes[target].backlinks.append(note.name)
     return notes
 
 
@@ -144,6 +151,21 @@ def _resolve_vault(vault: Optional[str]) -> str:
     return vault or DEFAULT_VAULT
 
 
+def _resolve_note_key(notes: dict[str, NoteInfo], key: str) -> str:
+    """Resolve a note identifier, preferring vault-relative paths."""
+    if key in notes:
+        return key
+    matches = [path for path, note in notes.items() if note.name == key]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Note name '{key}' is ambiguous; use vault-relative path",
+        )
+    raise HTTPException(status_code=404, detail=f"Note '{key}' not found")
+
+
 def invalidate_cache(vault_name: str = None):
     if vault_name:
         _vault_caches[vault_name] = None
@@ -155,10 +177,14 @@ def invalidate_cache(vault_name: str = None):
 # ─── Routes ─────────────────────────────────────────────────────────
 @router.get("/vaults")
 async def list_vaults():
-    """List all discovered vaults."""
+    """List all discovered vaults, with the configured default first."""
+    ordered = sorted(
+        VAULTS.items(),
+        key=lambda item: (0 if item[0] == DEFAULT_VAULT else 1, item[0].lower()),
+    )
     return [
-        {"name": name, "path": str(path), "note_count": len(_vault_caches.get(name, {}))}
-        for name, path in sorted(VAULTS.items())
+        {"name": name, "path": str(path), "note_count": len(_get_vault(name))}
+        for name, path in ordered
     ]
 
 
@@ -168,7 +194,7 @@ async def list_notes(vault: Optional[str] = Query(None)):
     v = _get_vault(vault_name)
     return [
         {
-            "name": n.name, "path": n.path, "folder": n.folder,
+            "id": n.path, "name": n.name, "path": n.path, "folder": n.folder,
             "size": n.size, "modified": n.modified, "tags": n.tags,
             "link_count": len(n.links), "backlink_count": len(n.backlinks),
             "word_count": n.word_count,
@@ -177,22 +203,20 @@ async def list_notes(vault: Optional[str] = Query(None)):
     ]
 
 
-@router.get("/notes/{name}")
+@router.get("/notes/{name:path}")
 async def get_note(name: str, vault: Optional[str] = Query(None)):
     vault_name = _resolve_vault(vault)
     v = _get_vault(vault_name)
-    if name not in v:
-        raise HTTPException(status_code=404, detail=f"Note '{name}' not found")
-    return v[name].model_dump()
+    key = _resolve_note_key(v, name)
+    return v[key].model_dump()
 
 
-@router.put("/notes/{name}")
+@router.put("/notes/{name:path}")
 async def update_note(name: str, body: NoteUpdate, vault: Optional[str] = Query(None)):
     vault_name = _resolve_vault(vault)
     v = _get_vault(vault_name)
-    if name not in v:
-        raise HTTPException(status_code=404, detail=f"Note '{name}' not found")
-    note = v[name]
+    key = _resolve_note_key(v, name)
+    note = v[key]
     file_path = VAULTS[vault_name] / note.path
     try:
         file_path.write_text(body.content, encoding="utf-8")
@@ -200,8 +224,8 @@ async def update_note(name: str, body: NoteUpdate, vault: Optional[str] = Query(
         raise HTTPException(status_code=500, detail=str(e))
     invalidate_cache(vault_name)
     v2 = _get_vault(vault_name)
-    if name in v2:
-        return v2[name].model_dump()
+    if key in v2:
+        return v2[key].model_dump()
     return {"status": "ok"}
 
 
@@ -210,14 +234,17 @@ async def get_graph(vault: Optional[str] = Query(None)):
     vault_name = _resolve_vault(vault)
     v = _get_vault(vault_name)
     nodes, edges, seen = [], [], set()
-    for name, note in v.items():
-        nodes.append(GraphNode(id=name, label=name, folder=note.folder, size=max(10, min(40, note.word_count // 10))))
+    by_stem: dict[str, list[str]] = {}
+    for key, note in v.items():
+        by_stem.setdefault(note.name, []).append(key)
+    for key, note in v.items():
+        nodes.append(GraphNode(id=note.path, label=note.name, folder=note.folder, size=max(10, min(40, note.word_count // 10))))
         for link in note.links:
-            if link in v:
-                ek = tuple(sorted([name, link]))
+            for target in by_stem.get(link, []):
+                ek = tuple(sorted([note.path, target]))
                 if ek not in seen:
                     seen.add(ek)
-                    edges.append(GraphEdge(source=name, target=link))
+                    edges.append(GraphEdge(source=note.path, target=target))
     return GraphData(nodes=nodes, edges=edges)
 
 
