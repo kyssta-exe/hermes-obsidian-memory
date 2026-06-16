@@ -1,0 +1,4 @@
+# Python bytecode
+dashboard/__pycache__/
+*.pyc
+__pycache__/
