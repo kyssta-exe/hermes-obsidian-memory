@@ -313,7 +313,9 @@
   // ─── MARKDOWN ────────────────────────────────────────────────────
   function renderMarkdown(text) {
     if (!text) return "";
-    let h = text.replace(/^---[\s\S]*?---\n/m, "");
+    // YAML frontmatter exists only at byte 0. Do not treat ordinary markdown
+    // horizontal rules later in a note as frontmatter delimiters.
+    let h = text.replace(/^---[\s\S]*?---\n/, "");
     h = h.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     h = h.replace(/```(\w*)\n([\s\S]*?)```/g, (_,l,c) => `<pre class="code-block" data-lang="${l}"><code>${c.trim()}</code></pre>`);
     h = h.replace(/(?:^|\n)(\|.+\|)\n(\|[-| :]+\|)\n((?:\|.+\|\n?)+)/g, (_,hdr,sep,body) => {
