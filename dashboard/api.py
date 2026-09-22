@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 router = APIRouter(tags=["obsidian"])
@@ -227,6 +228,23 @@ async def update_note(name: str, body: NoteUpdate, vault: Optional[str] = Query(
     if key in v2:
         return v2[key].model_dump()
     return {"status": "ok"}
+
+
+@router.get("/files/{path:path}")
+async def get_file(path: str, vault: Optional[str] = Query(None)):
+    """Serve a raw vault file (images, PDFs, etc.) by vault-relative path, confined to the vault root."""
+    vault_name = _resolve_vault(vault)
+    if vault_name not in VAULTS:
+        raise HTTPException(status_code=404, detail=f"Vault '{vault_name}' not found")
+    vault_root = VAULTS[vault_name].resolve()
+    file_path = (vault_root / path).resolve()
+    try:
+        file_path.relative_to(vault_root)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Path outside vault")
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(file_path)
 
 
 @router.get("/graph")

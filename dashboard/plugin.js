@@ -311,7 +311,19 @@
   }
 
   // ─── MARKDOWN ────────────────────────────────────────────────────
-  function renderMarkdown(text) {
+  function resolveImageSrc(src, noteFolder, vault) {
+    if (/^(https?:|data:)/i.test(src)) return src;
+    const clean = src.split("#")[0].split("?")[0];
+    const folder = noteFolder && noteFolder !== "root" ? noteFolder : "";
+    const combined = folder ? folder + "/" + clean : clean;
+    const parts = combined.split("/").filter(p => p && p !== ".");
+    const normalized = [];
+    for (const p of parts) { if (p === "..") normalized.pop(); else normalized.push(p); }
+    const q = vault ? "?vault=" + encodeURIComponent(vault) : "";
+    return BASE + "/files/" + normalized.map(encodeURIComponent).join("/") + q;
+  }
+
+  function renderMarkdown(text, noteFolder, vault) {
     if (!text) return "";
     let h = text.replace(/^---[\s\S]*?---\n/m, "");
     h = h.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -332,7 +344,7 @@
     h = h.replace(/(<blockquote class="md-quote">.*<\/blockquote>\n?)+/g, m=>`<div class="md-callout">${m}</div>`);
     h = h.replace(/^- \[x\] (.+)$/gm, '<div class="md-check"><span class="md-check-box checked">\u2713</span>$1</div>');
     h = h.replace(/^- \[ \] (.+)$/gm, '<div class="md-check"><span class="md-check-box"></span>$1</div>');
-    h = h.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" class="md-img" />');
+    h = h.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, src) => `<img src="${resolveImageSrc(src, noteFolder, vault)}" alt="${alt}" class="md-img" />`);
     h = h.replace(/\[\[([^\]|]+?)(?:\|([^\]]+))?\]\]/g, (_,n,a) => `<a class="md-wikilink" data-note="${n}" href="#">${a||n}</a>`);
     h = h.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener" class="md-link">$1</a>');
     h = h.replace(/\*\*\*(.+?)\*\*\*/g, "<strong><em>$1</em></strong>");
@@ -484,7 +496,7 @@
       } catch(e) { setSaveStatus("error: "+e.message); }
     }, [selected, currentVault, editText, loadAll]);
 
-    const renderedContent = useMemo(() => content ? renderMarkdown(content.content) : "", [content]);
+    const renderedContent = useMemo(() => content ? renderMarkdown(content.content, content.folder, currentVault) : "", [content, currentVault]);
     const viewerRef = useRef(null);
     useEffect(() => {
       const el = viewerRef.current; if (!el) return;
