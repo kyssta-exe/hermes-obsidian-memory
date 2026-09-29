@@ -1,6 +1,8 @@
 name: obsidian-memory
-version: 3.0.0
-description: "Browse, search, and edit Obsidian vault notes from the Hermes dashboard. Features force-directed graph visualization, multi-vault support, markdown rendering with wikilinks, and inline note editing."
+version: 3.1.0
+manifest_version: 2
+api_version: 1
+description: "Browse, search, and edit Obsidian vault notes from the Hermes dashboard, and let the agent read and write the same notes. Force-directed graph visualization, multi-vault support, markdown rendering with wikilinks, inline note editing."
 author: Kyssta
 license: MIT
 homepage: https://github.com/kyssta-exe/hermes-obsidian-memory
@@ -10,11 +12,15 @@ tags:
   - knowledge-base
   - graph
   - dashboard
-provides_tools: []
-dependencies: []
+  - memory
+provides_tools:
+  - obsidian_list_vaults
+  - obsidian_search_notes
+  - obsidian_read_note
+  - obsidian_write_note
+
+# No requires_env: an unset OBSIDIAN_VAULT_PATH must not disable the plugin.
+# Vault discovery falls back to ~/ObsidianVault, its siblings, ~/Documents/Obsidian,
+# ~/obsidian-vaults and ~/vaults, and the dashboard reports an empty state instead.
 requires_env: []
-dashboard:
-  label: Obsidian
-  icon: BookOpen
-  path: /obsidian
-  position: after:skills
+dependencies: []
