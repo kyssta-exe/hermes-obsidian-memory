@@ -1,277 +1,185 @@
-"""Obsidian Memory plugin API — serves vault notes and graph data. Supports multiple vaults."""
+"""Obsidian Memory — dashboard backend.
 
-import json
-import os
-import re
+FastAPI routes for the dashboard tab, mounted by the host under
+``/api/plugins/obsidian-memory/``.
+
+The host loads this file with ``importlib.util.spec_from_file_location`` and no
+package context, so a plain relative import of the plugin's ``vault`` module
+cannot resolve. Load it by path instead — that keeps one implementation of the
+vault logic shared with the agent-side tools in ``__init__.py``.
+
+Routes are mounted once at dashboard startup, so a plugin change needs a
+restart (``hermes dashboard``), not a rescan. Static JS/CSS are picked up by
+``GET /api/dashboard/plugins/rescan``.
+"""
+
+import importlib.util
+import sys
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Query
+
+# ``api.py`` lives in <plugin>/dashboard/, so the shared module is one level up.
+_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _load_vault_module():
+    """Import ``<plugin>/vault.py``, preferring an already-loaded copy.
+
+    When the agent-side plugin is also enabled, Hermes has imported the same
+    file as ``hermes_plugins.obsidian_memory.vault``. Reusing it keeps one
+    module (and one ``default_store`` cache) in the process instead of two
+    independent copies that can disagree. Otherwise fall back to a path-based
+    import, which is all that is available when the dashboard is running
+    without the agent plugin.
+    """
+    for name, module in list(sys.modules.items()):
+        if module is not None and name.endswith(".vault") and name.startswith("hermes_plugins."):
+            if getattr(module, "VaultStore", None) is not None:
+                return module
+    module_name = "obsidian_memory_vault"
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(module_name, _PLUGIN_ROOT / "vault.py")
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load vault module from {_PLUGIN_ROOT / 'vault.py'}")
+    module = importlib.util.module_from_spec(spec)
+    # Registered before exec so dataclasses/pydantic can resolve annotations.
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(module_name, None)
+        raise
+    return module
+
+
+_vault = _load_vault_module()
+_VaultStore = _vault.VaultStore
+_AmbiguousNote = _vault.AmbiguousNote
+_NoteNotFound = _vault.NoteNotFound
+
+# One store for the dashboard process: discovery walks the filesystem, so a
+# fresh one per request would re-scan the home directory on every call.
+store = _VaultStore()
 
 router = APIRouter(tags=["obsidian"])
 
-# ─── Vault discovery ────────────────────────────────────────────────
-# Primary vault from env, plus auto-discover sibling .obsidian dirs
-_PRIMARY = Path(os.environ.get("OBSIDIAN_VAULT_PATH", "/home/ubuntu/ObsidianVault"))
 
+def _resolve(vault: Optional[str], identifier: Optional[str] = None):
+    """Run a vault lookup, translating vault exceptions into HTTP responses.
 
-def _discover_vaults() -> dict[str, Path]:
-    """Find all vaults: primary + any with .obsidian in common locations."""
-    vaults = {}
-    if _PRIMARY.exists():
-        vaults[_PRIMARY.name] = _PRIMARY
-    # Check parent dir for sibling vaults
-    parent = _PRIMARY.parent
-    if parent.exists():
-        for d in parent.iterdir():
-            if d.is_dir() and (d / ".obsidian").exists() and d not in vaults.values():
-                vaults[d.name] = d
-    # Also check common paths
-    for extra in [
-        Path.home() / "Documents" / "Obsidian",
-        Path.home() / "obsidian-vaults",
-        Path.home() / "vaults",
-    ]:
-        if extra.exists():
-            for d in extra.iterdir():
-                if d.is_dir() and (d / ".obsidian").exists() and d.name not in vaults:
-                    vaults[d.name] = d
-    return vaults
-
-
-VAULTS = _discover_vaults()
-DEFAULT_VAULT = _PRIMARY.name if _PRIMARY.name in VAULTS else next(iter(VAULTS), "")
-
-
-# ─── Models ─────────────────────────────────────────────────────────
-class NoteInfo(BaseModel):
-    name: str
-    path: str
-    folder: str
-    size: int
-    modified: str
-    tags: list[str]
-    links: list[str]
-    backlinks: list[str]
-    content: str
-    word_count: int
-
-
-class GraphNode(BaseModel):
-    id: str
-    label: str
-    folder: str
-    size: int
-
-
-class GraphEdge(BaseModel):
-    source: str
-    target: str
-
-
-class GraphData(BaseModel):
-    nodes: list[GraphNode]
-    edges: list[GraphEdge]
-
-
-class NoteUpdate(BaseModel):
-    content: str
-
-
-# ─── Helpers ────────────────────────────────────────────────────────
-def _extract_tags(content: str) -> list[str]:
-    tags = re.findall(r"#(\w+)", content)
-    fm_match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
-    if fm_match:
-        fm = fm_match.group(1)
-        tag_matches = re.findall(r"tags:\s*\n((?:\s*-\s*\w+\n?)+)", fm)
-        for block in tag_matches:
-            tags.extend(re.findall(r"-\s*(\w+)", block))
-    return list(set(tags))
-
-
-def _extract_wikilinks(content: str) -> list[str]:
-    return list(set(re.findall(r"\[\[([^\]|]+?)(?:\|[^\]]+)?\]\]", content)))
-
-
-def _scan_vault(vault_path: Path) -> dict[str, NoteInfo]:
-    notes = {}
-    if not vault_path.exists():
-        return notes
-    for md_file in vault_path.rglob("*.md"):
-        rel = md_file.relative_to(vault_path)
-        try:
-            content = md_file.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            continue
-        stat = md_file.stat()
-        tags = _extract_tags(content)
-        links = _extract_wikilinks(content)
-        note = NoteInfo(
-            name=md_file.stem,
-            path=str(rel),
-            folder=str(rel.parent) if str(rel.parent) != "." else "root",
-            size=stat.st_size,
-            modified=str(stat.st_mtime),
-            tags=tags,
-            links=links,
-            backlinks=[],
-            content=content,
-            word_count=len(content.split()),
-        )
-        # Key by vault-relative path, not filename stem. Real vaults often have
-        # repeated note names in different folders (README.md, Overview.md,
-        # mirrored service/index notes). Stem keys make notes disappear and
-        # make clicks open the wrong file.
-        notes[str(rel)] = note
-    by_stem: dict[str, list[str]] = {}
-    for key, note in notes.items():
-        by_stem.setdefault(note.name, []).append(key)
-    for key, note in notes.items():
-        for link in note.links:
-            for target in by_stem.get(link, []):
-                notes[target].backlinks.append(note.name)
-    return notes
-
-
-# Per-vault cache
-_vault_caches: dict[str, dict[str, NoteInfo]] = {}
-
-
-def _get_vault(vault_name: str) -> dict[str, NoteInfo]:
-    if vault_name not in VAULTS:
-        raise HTTPException(status_code=404, detail=f"Vault '{vault_name}' not found")
-    if vault_name not in _vault_caches or _vault_caches[vault_name] is None:
-        _vault_caches[vault_name] = _scan_vault(VAULTS[vault_name])
-    return _vault_caches[vault_name]
-
-
-def _resolve_vault(vault: Optional[str]) -> str:
-    return vault or DEFAULT_VAULT
-
-
-def _resolve_note_key(notes: dict[str, NoteInfo], key: str) -> str:
-    """Resolve a note identifier, preferring vault-relative paths."""
-    if key in notes:
-        return key
-    matches = [path for path, note in notes.items() if note.name == key]
-    if len(matches) == 1:
-        return matches[0]
-    if len(matches) > 1:
+    Ambiguity is a 409 with the candidate paths rather than a 404, so the UI
+    can tell "wrong path" apart from "several notes share that title".
+    """
+    try:
+        if identifier is None:
+            return store.notes(vault)
+        return store.get_note(vault, identifier)
+    except _AmbiguousNote as exc:
         raise HTTPException(
             status_code=409,
-            detail=f"Note name '{key}' is ambiguous; use vault-relative path",
-        )
-    raise HTTPException(status_code=404, detail=f"Note '{key}' not found")
+            detail={
+                "error": f"Note '{exc.name}' matches {len(exc.matches)} notes; use a full path.",
+                "candidates": exc.matches,
+            },
+        ) from exc
+    except _NoteNotFound as exc:
+        raise HTTPException(status_code=404, detail=f"Note '{exc.args[0]}' not found") from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Vault '{exc.args[0]}' not found") from exc
 
 
-def invalidate_cache(vault_name: str = None):
-    if vault_name:
-        _vault_caches[vault_name] = None
-    else:
-        for k in _vault_caches:
-            _vault_caches[k] = None
-
-
-# ─── Routes ─────────────────────────────────────────────────────────
 @router.get("/vaults")
-async def list_vaults():
-    """List all discovered vaults, with the configured default first."""
-    ordered = sorted(
-        VAULTS.items(),
-        key=lambda item: (0 if item[0] == DEFAULT_VAULT else 1, item[0].lower()),
-    )
-    return [
-        {"name": name, "path": str(path), "note_count": len(_get_vault(name))}
-        for name, path in ordered
-    ]
+async def list_vaults(refresh: bool = Query(False, description="Re-run vault discovery")):
+    """Every discovered vault, default first, with note counts."""
+    if refresh:
+        store.refresh_discovery()
+    try:
+        return store.list_vaults()
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Vault '{exc.args[0]}' not found") from exc
 
 
 @router.get("/notes")
-async def list_notes(vault: Optional[str] = Query(None)):
-    vault_name = _resolve_vault(vault)
-    v = _get_vault(vault_name)
-    return [
-        {
-            "id": n.path, "name": n.name, "path": n.path, "folder": n.folder,
-            "size": n.size, "modified": n.modified, "tags": n.tags,
-            "link_count": len(n.links), "backlink_count": len(n.backlinks),
-            "word_count": n.word_count,
-        }
-        for n in sorted(v.values(), key=lambda x: x.modified, reverse=True)
-    ]
-
-
-@router.get("/notes/{name:path}")
-async def get_note(name: str, vault: Optional[str] = Query(None)):
-    vault_name = _resolve_vault(vault)
-    v = _get_vault(vault_name)
-    key = _resolve_note_key(v, name)
-    return v[key].model_dump()
-
-
-@router.put("/notes/{name:path}")
-async def update_note(name: str, body: NoteUpdate, vault: Optional[str] = Query(None)):
-    vault_name = _resolve_vault(vault)
-    v = _get_vault(vault_name)
-    key = _resolve_note_key(v, name)
-    note = v[key]
-    file_path = VAULTS[vault_name] / note.path
-    try:
-        file_path.write_text(body.content, encoding="utf-8")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    invalidate_cache(vault_name)
-    v2 = _get_vault(vault_name)
-    if key in v2:
-        return v2[key].model_dump()
-    return {"status": "ok"}
-
-
-@router.get("/graph")
-async def get_graph(vault: Optional[str] = Query(None)):
-    vault_name = _resolve_vault(vault)
-    v = _get_vault(vault_name)
-    nodes, edges, seen = [], [], set()
-    by_stem: dict[str, list[str]] = {}
-    for key, note in v.items():
-        by_stem.setdefault(note.name, []).append(key)
-    for key, note in v.items():
-        nodes.append(GraphNode(id=note.path, label=note.name, folder=note.folder, size=max(10, min(40, note.word_count // 10))))
-        for link in note.links:
-            for target in by_stem.get(link, []):
-                ek = tuple(sorted([note.path, target]))
-                if ek not in seen:
-                    seen.add(ek)
-                    edges.append(GraphEdge(source=note.path, target=target))
-    return GraphData(nodes=nodes, edges=edges)
+async def list_notes(
+    vault: Optional[str] = Query(None),
+    q: Optional[str] = Query(None, description="Match name, path or content"),
+    folder: Optional[str] = Query(None),
+    tag: Optional[str] = Query(None),
+):
+    """Note metadata for the sidebar list — no note bodies."""
+    _resolve(vault)  # 404 on an unknown vault before touching the store
+    notes = store.list_notes(vault_name=vault, query=q or "", folder=folder or "", tag=(tag or "").lstrip("#"))
+    return [note.summary() for note in notes]
 
 
 @router.get("/folders")
 async def list_folders(vault: Optional[str] = Query(None)):
-    vault_name = _resolve_vault(vault)
-    v = _get_vault(vault_name)
-    folders = {}
-    for note in v.values():
-        folders[note.folder] = folders.get(note.folder, 0) + 1
-    return [{"name": f, "count": c} for f, c in sorted(folders.items())]
+    _resolve(vault)
+    return store.folders(vault)
 
 
 @router.get("/tags")
 async def list_tags(vault: Optional[str] = Query(None)):
-    vault_name = _resolve_vault(vault)
-    v = _get_vault(vault_name)
-    tc: dict[str, int] = {}
-    for note in v.values():
-        for tag in note.tags:
-            tc[tag] = tc.get(tag, 0) + 1
-    return [{"tag": t, "count": c} for t, c in sorted(tc.items(), key=lambda x: -x[1])]
+    _resolve(vault)
+    return store.tags(vault)
+
+
+@router.get("/graph")
+async def get_graph(vault: Optional[str] = Query(None)):
+    _resolve(vault)
+    return store.graph(vault)
+
+
+@router.get("/notes/{name:path}")
+async def get_note(name: str, vault: Optional[str] = Query(None)):
+    """One note in full, including tags, outgoing links and backlinks."""
+    return _resolve(vault, name).full()
+
+
+@router.put("/notes/{name:path}")
+async def update_note(name: str, content: str = Query(..., description="New markdown body"), vault: Optional[str] = Query(None)):
+    """Overwrite a note's body.
+
+    Content arrives as a query parameter rather than a JSON body: URLs are
+    bounded by the browser and the proxy, and a long note in a URL is a
+    reliable way to fail a save on a large vault. The dashboard client
+    therefore PUTs with a text/plain body — see ``plugin.js``.
+    """
+    _resolve(vault, name)
+    try:
+        return store.write_note(vault, name, content).full()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/notes")
+async def create_note(
+    name: str = Query(..., description="Vault-relative path for the new note"),
+    content: str = Query("", description="Initial markdown body"),
+    vault: Optional[str] = Query(None),
+):
+    """Create a new note. 409 when the path is already taken."""
+    try:
+        return store.create_note(vault, name, content).full()
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=f"Note '{exc.args[0]}' already exists") from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Vault '{exc.args[0]}' not found") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.post("/refresh")
-async def refresh_vault(vault: Optional[str] = Query(None)):
-    vault_name = _resolve_vault(vault)
-    invalidate_cache(vault_name)
-    v = _get_vault(vault_name)
-    return {"status": "ok", "vault": vault_name, "notes": len(v)}
+async def refresh(vault: Optional[str] = Query(None), rediscover: bool = Query(False)):
+    """Drop the scan cache (and optionally re-run discovery) after an external edit."""
+    if rediscover:
+        store.refresh_discovery()
+    else:
+        _resolve(vault)
+        store.invalidate(vault)
+    notes = _resolve(vault)
+    return {"status": "ok", "vault": store.resolve_vault(vault), "notes": len(notes)}

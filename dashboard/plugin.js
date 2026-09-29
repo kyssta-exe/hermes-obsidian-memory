@@ -1,6 +1,14 @@
 /**
- * Obsidian Memory Dashboard Plugin v3
- * Vault selector, fixed graph, note editing, multi-vault support
+ * Obsidian Memory — dashboard tab.
+ *
+ * Authored against the Hermes dashboard Plugin SDK (window.__HERMES_PLUGIN_SDK__,
+ * contract v1.1). Nothing is bundled: React, the API client and the UI primitives
+ * all come off the SDK.
+ *
+ * Colours are read from the active dashboard theme's `--color-*` custom
+ * properties rather than hardcoded, so the tab reskins with the theme picker.
+ * DOM styling can use `var(--color-…)` inline; the graph canvas cannot, so it
+ * resolves the same tokens through `themeColor()` at draw time.
  */
 (function () {
   "use strict";
@@ -10,19 +18,67 @@
   if (!registry || !registry.register) return;
   if (!sdk) return;
 
-  const { React, hooks, fetchJSON, components, utils } = sdk;
-  const { useState, useEffect, useRef, useMemo, useCallback } = React;
+  const { React, fetchJSON, utils } = sdk;
+  // `hooks` is the documented surface; fall back to React for older hosts.
+  const hooks = sdk.hooks || React;
+  const { useState, useEffect, useRef, useMemo, useCallback } = hooks;
 
-  const FOLDER_COLORS = {
-    root: "#a8e619", ChessDIY: "#3b82f6", Business: "#ff2d75",
-    Ideas: "#f59e0b", Infrastructure: "#9333ea", default: "#a8e619",
-  };
-  const SURFACE = "rgba(255,255,255,0.04)";
-  const BORDER = "rgba(255,255,255,0.1)";
-  const TEXT = "#e5e5e5";
-  const TEXT_DIM = "rgba(255,255,255,0.45)";
-  const ACCENT = "#a8e619";
   const BASE = "/api/plugins/obsidian-memory";
+
+  // ─── Theme tokens ─────────────────────────────────────────────────
+  // Every value keeps a fallback so the tab stays readable on a host whose
+  // palette has not defined one of these yet.
+  const SURFACE = "var(--color-card, rgba(255,255,255,0.04))";
+  const SURFACE_2 = "var(--color-muted, rgba(255,255,255,0.06))";
+  const BORDER = "var(--color-border, rgba(255,255,255,0.1))";
+  const TEXT = "var(--color-foreground, #e5e5e5)";
+  const TEXT_DIM = "var(--color-muted-foreground, rgba(255,255,255,0.55))";
+  const ACCENT = "var(--color-primary, #a8e619)";
+  const ACCENT_SOFT = "color-mix(in srgb, var(--color-primary, #a8e619) 14%, transparent)";
+  const ACCENT_FAINT = "color-mix(in srgb, var(--color-primary, #a8e619) 7%, transparent)";
+  const LINK = "var(--color-accent, #60a5fa)";
+
+  /** Resolve a `--color-*` token to a concrete value. Canvas needs real colors. */
+  function themeColor(token, fallback) {
+    try {
+      const v = getComputedStyle(document.documentElement).getPropertyValue(token).trim();
+      return v || fallback;
+    } catch (e) { return fallback; }
+  }
+
+  /** Add an alpha channel to a resolved hex/rgb color for canvas fills. */
+  function withAlpha(color, alpha) {
+    const c = (color || "").trim();
+    if (c.startsWith("#")) {
+      const hex = c.length === 4
+        ? c.slice(1).split("").map(ch => ch + ch).join("")
+        : c.slice(1, 7);
+      const n = parseInt(hex, 16);
+      if (!Number.isNaN(n)) return `rgba(${(n>>16)&255},${(n>>8)&255},${n&255},${alpha})`;
+    }
+    const m = c.match(/^rgba?\(([^)]+)\)$/);
+    if (m) {
+      const parts = m[1].split(",").map(s => s.trim());
+      return `rgba(${parts[0]},${parts[1] || "0"},${parts[2] || "0"},${alpha})`;
+    }
+    return c;
+  }
+
+  // Node colours are assigned per folder by hashing the folder name, so any
+  // vault layout gets a stable, distinct colour without a hardcoded map.
+  const FOLDER_PALETTE = ["#a8e619","#60a5fa","#ff2d75","#f59e0b","#9333ea","#22d3ee","#fb7185","#84cc16"];
+  function folderColor(folder) {
+    const key = String(folder || "root");
+    let h = 0;
+    for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
+    return FOLDER_PALETTE[h % FOLDER_PALETTE.length];
+  }
+  /** The folders actually present in the graph, for the legend. */
+  const legendFolders = nodes => {
+    const seen = [];
+    for (const n of nodes) if (!seen.includes(n.folder)) seen.push(n.folder);
+    return seen.slice(0, 8);
+  };
 
   // ─── GRAPH (fixed height, no grow) ──────────────────────────────
   function GraphView({ nodes, edges, onSelect, selectedNode }) {
@@ -163,6 +219,14 @@
         if (canvas.height !== H) canvas.height = H;
         const pos = positions.current;
 
+        // Canvas 2D cannot use `var()`, so resolve the theme tokens here.
+        // Re-read every frame: switching themes does not reload the bundle.
+        const accentColor = themeColor("--color-primary", "#a8e619");
+        const borderColor = themeColor("--color-border", "rgba(255,255,255,0.1)");
+        const fgColor = themeColor("--color-foreground", "#e5e5e5");
+        const bgColor = themeColor("--color-background", "#05090a");
+        const dimColor = themeColor("--color-muted-foreground", "#bbbbbb");
+
         ctx.clearRect(0, 0, W, H);
         ctx.save();
         ctx.translate(offset.x, offset.y);
@@ -179,7 +243,7 @@
           const nx = -dy / dist, ny = dx / dist;
           const cpx = mx + nx * curve, cpy = my + ny * curve;
           const hl = selectedNode === e.source || selectedNode === e.target;
-          ctx.strokeStyle = hl ? "rgba(168,230,25,0.5)" : "rgba(255,255,255,0.06)";
+          ctx.strokeStyle = hl ? withAlpha(accentColor, 0.5) : withAlpha(borderColor, 0.6);
           ctx.lineWidth = hl ? 1.5 : 0.7;
           ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.quadraticCurveTo(cpx, cpy, b.x, b.y); ctx.stroke();
           if (hl) {
@@ -189,7 +253,7 @@
             const tx = 2*(1-t)*(cpx-a.x)+2*t*(b.x-cpx);
             const ty = 2*(1-t)*(cpy-a.y)+2*t*(b.y-cpy);
             const angle = Math.atan2(ty, tx);
-            ctx.fillStyle = "rgba(168,230,25,0.5)";
+            ctx.fillStyle = withAlpha(accentColor, 0.5);
             ctx.beginPath(); ctx.moveTo(ax, ay);
             ctx.lineTo(ax-7*Math.cos(angle-0.4), ay-7*Math.sin(angle-0.4));
             ctx.lineTo(ax-7*Math.cos(angle+0.4), ay-7*Math.sin(angle+0.4));
@@ -204,18 +268,18 @@
           const sel = selectedNode === n.id, hov = hovered === n.id;
           const deg = degreeMap[n.id] || 0;
           const r = Math.max(5, Math.min(16, 4 + deg * 2));
-          const color = FOLDER_COLORS[n.folder] || FOLDER_COLORS.default;
+          const color = folderColor(n.folder);
           if (sel || hov) {
             const grad = ctx.createRadialGradient(p.x, p.y, r, p.x, p.y, r*2.5);
-            grad.addColorStop(0, color+"30"); grad.addColorStop(1, color+"00");
+            grad.addColorStop(0, withAlpha(color, 0.19)); grad.addColorStop(1, withAlpha(color, 0));
             ctx.fillStyle = grad; ctx.beginPath(); ctx.arc(p.x, p.y, r*2.5, 0, Math.PI*2); ctx.fill();
           }
           ctx.beginPath(); ctx.arc(p.x, p.y, r+(sel?2:0), 0, Math.PI*2);
-          ctx.fillStyle = sel ? "#fff" : color; ctx.globalAlpha = hov ? 1 : 0.85;
+          ctx.fillStyle = sel ? fgColor : color; ctx.globalAlpha = hov ? 1 : 0.85;
           ctx.fill(); ctx.globalAlpha = 1;
-          ctx.strokeStyle = sel ? color : "rgba(0,0,0,0.4)"; ctx.lineWidth = sel ? 2 : 1; ctx.stroke();
+          ctx.strokeStyle = sel ? color : withAlpha(bgColor, 0.4); ctx.lineWidth = sel ? 2 : 1; ctx.stroke();
           if (hov || sel || r > 7) {
-            ctx.fillStyle = sel ? color : "#bbb";
+            ctx.fillStyle = sel ? color : dimColor;
             ctx.font = (sel?"bold ":"") + Math.max(9, Math.min(12, r)) + "px -apple-system, sans-serif";
             ctx.textAlign = "center"; ctx.fillText(n.label, p.x, p.y - r - 4);
           }
@@ -302,10 +366,9 @@
         React.createElement("button", { onClick: () => setScale(s=>Math.max(0.15,s*0.7)), style: { width:28,height:28,borderRadius:6,border:"1px solid "+BORDER,background:SURFACE,color:TEXT,cursor:"pointer",fontSize:14,display:"flex",alignItems:"center",justifyContent:"center" } }, "\u2212"),
         React.createElement("button", { onClick: () => { setOffset({x:0,y:0}); setScale(1); }, style: { width:28,height:28,borderRadius:6,border:"1px solid "+BORDER,background:SURFACE,color:TEXT,cursor:"pointer",fontSize:11,display:"flex",alignItems:"center",justifyContent:"center" } }, "\u21ba")
       ),
-      React.createElement("div", { style: { position: "absolute", top: 12, left: 12, display: "flex", gap: 10, flexWrap: "wrap" } },
-        ...Object.entries(FOLDER_COLORS).filter(([k])=>k!=="default").map(([folder,color]) =>
+      React.createElement("div", { style: { position: "absolute", top: 12, left: 12, display: "flex", gap: 10, flexWrap: "wrap" } },        ...legendFolders(nodes).map(folder=>
           React.createElement("span", { key: folder, style: { fontSize:11,display:"flex",alignItems:"center",gap:4,color:TEXT_DIM } },
-            React.createElement("span", { style: { width:8,height:8,borderRadius:"50%",background:color,display:"inline-block" } }), folder))
+            React.createElement("span", { style: { width:8,height:8,borderRadius:"50%",background:folderColor(folder),display:"inline-block" } }), folder))
       )
     );
   }
@@ -315,42 +378,42 @@
     if (!text) return "";
     let h = text.replace(/^---[\s\S]*?---\n/m, "");
     h = h.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    h = h.replace(/```(\w*)\n([\s\S]*?)```/g, (_,l,c) => `<pre class="code-block" data-lang="${l}"><code>${c.trim()}</code></pre>`);
+    h = h.replace(/```(\w*)\n([\s\S]*?)```/g, (_,l,c) => `<pre class="om-code-block" data-lang="${l}"><code>${c.trim()}</code></pre>`);
     h = h.replace(/(?:^|\n)(\|.+\|)\n(\|[-| :]+\|)\n((?:\|.+\|\n?)+)/g, (_,hdr,sep,body) => {
       const ths = hdr.split("|").filter(c=>c.trim()).map(c=>`<th>${c.trim()}</th>`).join("");
       const rows = body.trim().split("\n").map(r=>{const tds=r.split("|").filter(c=>c.trim()).map(c=>`<td>${c.trim()}</td>`).join("");return `<tr>${tds}</tr>`;}).join("");
-      return `<table class="md-table"><thead><tr>${ths}</tr></thead><tbody>${rows}</tbody></table>`;
+      return `<table class="om-table"><thead><tr>${ths}</tr></thead><tbody>${rows}</tbody></table>`;
     });
-    h = h.replace(/^###### (.+)$/gm, '<h6 class="md-h6">$1</h6>');
-    h = h.replace(/^##### (.+)$/gm, '<h5 class="md-h5">$1</h5>');
-    h = h.replace(/^#### (.+)$/gm, '<h4 class="md-h4">$1</h4>');
-    h = h.replace(/^### (.+)$/gm, '<h3 class="md-h3">$1</h3>');
-    h = h.replace(/^## (.+)$/gm, '<h2 class="md-h2">$1</h2>');
-    h = h.replace(/^# (.+)$/gm, '<h1 class="md-h1">$1</h1>');
-    h = h.replace(/^(-{3,}|\*{3,}|_{3,})$/gm, '<hr class="md-hr" />');
-    h = h.replace(/^&gt; (.+)$/gm, '<blockquote class="md-quote">$1</blockquote>');
-    h = h.replace(/(<blockquote class="md-quote">.*<\/blockquote>\n?)+/g, m=>`<div class="md-callout">${m}</div>`);
-    h = h.replace(/^- \[x\] (.+)$/gm, '<div class="md-check"><span class="md-check-box checked">\u2713</span>$1</div>');
-    h = h.replace(/^- \[ \] (.+)$/gm, '<div class="md-check"><span class="md-check-box"></span>$1</div>');
-    h = h.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" class="md-img" />');
-    h = h.replace(/\[\[([^\]|]+?)(?:\|([^\]]+))?\]\]/g, (_,n,a) => `<a class="md-wikilink" data-note="${n}" href="#">${a||n}</a>`);
-    h = h.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener" class="md-link">$1</a>');
+    h = h.replace(/^###### (.+)$/gm, '<h6 class="om-h6">$1</h6>');
+    h = h.replace(/^##### (.+)$/gm, '<h5 class="om-h5">$1</h5>');
+    h = h.replace(/^#### (.+)$/gm, '<h4 class="om-h4">$1</h4>');
+    h = h.replace(/^### (.+)$/gm, '<h3 class="om-h3">$1</h3>');
+    h = h.replace(/^## (.+)$/gm, '<h2 class="om-h2">$1</h2>');
+    h = h.replace(/^# (.+)$/gm, '<h1 class="om-h1">$1</h1>');
+    h = h.replace(/^(-{3,}|\*{3,}|_{3,})$/gm, '<hr class="om-hr" />');
+    h = h.replace(/^&gt; (.+)$/gm, '<blockquote class="om-quote">$1</blockquote>');
+    h = h.replace(/(<blockquote class="om-quote">.*<\/blockquote>\n?)+/g, m=>`<div class="om-callout">${m}</div>`);
+    h = h.replace(/^- \[x\] (.+)$/gm, '<div class="om-check"><span class="om-check-box om-checked">\u2713</span>$1</div>');
+    h = h.replace(/^- \[ \] (.+)$/gm, '<div class="om-check"><span class="om-check-box"></span>$1</div>');
+    h = h.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" class="om-img" />');
+    h = h.replace(/\[\[([^\]|]+?)(?:\|([^\]]+))?\]\]/g, (_,n,a) => `<a class="om-wikilink" data-note="${n}" href="#">${a||n}</a>`);
+    h = h.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener" class="om-link">$1</a>');
     h = h.replace(/\*\*\*(.+?)\*\*\*/g, "<strong><em>$1</em></strong>");
     h = h.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
     h = h.replace(/__(.+?)__/g, "<strong>$1</strong>");
     h = h.replace(/\*(.+?)\*/g, "<em>$1</em>");
     h = h.replace(/_(.+?)_/g, "<em>$1</em>");
     h = h.replace(/~~(.+?)~~/g, "<del>$1</del>");
-    h = h.replace(/`([^`]+)`/g, '<code class="md-inline-code">$1</code>');
-    h = h.replace(/^[-*+] (.+)$/gm, '<li class="md-li">$1</li>');
-    h = h.replace(/((?:<li class="md-li">.*<\/li>\n?)+)/g, m=>`<ul class="md-ul">${m}</ul>`);
-    h = h.replace(/^\d+\. (.+)$/gm, '<li class="md-oli">$1</li>');
-    h = h.replace(/((?:<li class="md-oli">.*<\/li>\n?)+)/g, m=>`<ol class="md-ol">${m}</ol>`);
-    h = h.replace(/\n\n+/g, '</p><p class="md-p">');
+    h = h.replace(/`([^`]+)`/g, '<code class="om-inline-code">$1</code>');
+    h = h.replace(/^[-*+] (.+)$/gm, '<li class="om-li">$1</li>');
+    h = h.replace(/((?:<li class="om-li">.*<\/li>\n?)+)/g, m=>`<ul class="om-ul">${m}</ul>`);
+    h = h.replace(/^\d+\. (.+)$/gm, '<li class="om-oli">$1</li>');
+    h = h.replace(/((?:<li class="om-oli">.*<\/li>\n?)+)/g, m=>`<ol class="om-ol">${m}</ol>`);
+    h = h.replace(/\n\n+/g, '</p><p class="om-p">');
     h = h.replace(/\n/g, "<br/>");
-    h = '<p class="md-p">' + h + "</p>";
-    h = h.replace(/<p class="md-p">\s*<\/p>/g, "");
-    h = h.replace(/<p class="md-p">\s*(<(?:h[1-6]|ul|ol|table|pre|blockquote|div|hr))/g, "$1");
+    h = '<p class="om-p">' + h + "</p>";
+    h = h.replace(/<p class="om-p">\s*<\/p>/g, "");
+    h = h.replace(/<p class="om-p">\s*(<(?:h[1-6]|ul|ol|table|pre|blockquote|div|hr))/g, "$1");
     h = h.replace(/(\/(?:h[1-6]|ul|ol|table|pre|blockquote|div)>)\s*<\/p>/g, "$1");
     return h;
   }
@@ -361,44 +424,43 @@
     const s = document.createElement("style");
     s.id = "obsidian-plugin-styles";
     s.textContent = `
-      .code-block{background:rgba(0,0,0,.4);border:1px solid rgba(255,255,255,.08);border-radius:6px;padding:12px 14px;margin:10px 0;overflow-x:auto;font-size:12px;line-height:1.5;font-family:'SF Mono','Fira Code',monospace}
-      .code-block code{color:#e5e5e5}
-      .code-block::before{content:attr(data-lang);display:block;font-size:10px;color:rgba(255,255,255,.3);text-transform:uppercase;margin-bottom:6px}
-      .md-table{width:100%;border-collapse:collapse;margin:10px 0;font-size:13px}
-      .md-table th{text-align:left;padding:6px 10px;border-bottom:2px solid rgba(255,255,255,.15);color:rgba(255,255,255,.7);font-weight:600}
-      .md-table td{padding:5px 10px;border-bottom:1px solid rgba(255,255,255,.06)}
-      .md-table tr:hover td{background:rgba(255,255,255,.03)}
-      .md-h1{font-size:22px;font-weight:700;margin:16px 0 8px}
-      .md-h2{font-size:18px;font-weight:700;margin:14px 0 6px}
-      .md-h3{font-size:15px;font-weight:700;margin:12px 0 4px}
-      .md-h4,.md-h5,.md-h6{font-size:13px;font-weight:600;margin:10px 0 4px;opacity:.85}
-      .md-hr{border:none;border-top:1px solid rgba(255,255,255,.1);margin:16px 0}
-      .md-callout{background:rgba(255,255,255,.04);border-left:3px solid #60a5fa;border-radius:0 6px 6px 0;padding:8px 12px;margin:10px 0}
-      .md-quote{border-left:2px solid rgba(255,255,255,.2);padding-left:10px;margin:4px 0;color:rgba(255,255,255,.65);font-style:italic}
-      .md-check{display:flex;align-items:center;gap:8px;margin:3px 0;font-size:13px}
-      .md-check-box{width:16px;height:16px;border:1.5px solid rgba(255,255,255,.25);border-radius:3px;display:inline-flex;align-items:center;justify-content:center;font-size:11px;flex-shrink:0}
-      .md-check-box.checked{background:#a8e619;border-color:#a8e619;color:#000}
-      .md-img{max-width:100%;border-radius:6px;margin:8px 0}
-      .md-wikilink{color:#60a5fa;cursor:pointer;text-decoration:none;border-bottom:1px dashed rgba(96,165,250,.3)}
-      .md-wikilink:hover{color:#93c5fd;border-bottom-color:#93c5fd}
-      .md-link{color:#a8e619;text-decoration:none}
-      .md-link:hover{text-decoration:underline}
-      .md-inline-code{background:rgba(255,255,255,.08);padding:1px 5px;border-radius:3px;font-size:12px;font-family:'SF Mono','Fira Code',monospace}
-      .md-ul,.md-ol{margin:4px 0 4px 20px}
-      .md-li,.md-oli{margin:2px 0;font-size:13px}
-      .md-p{margin:4px 0}
-      .note-edit-area{width:100%;min-height:300px;background:rgba(0,0,0,.3);border:1px solid rgba(168,230,25,.3);border-radius:6px;padding:12px;color:#e5e5e5;font-family:'SF Mono','Fira Code',monospace;font-size:13px;line-height:1.6;resize:vertical;outline:none}
-      .note-edit-area:focus{border-color:#a8e619}
-      .edit-bar{display:flex;gap:6px;margin-bottom:8px;align-items:center}
-      .btn-sm{padding:4px 12px;border-radius:5px;border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.06);color:#e5e5e5;cursor:pointer;font-size:12px;font-weight:600}
-      .btn-sm:hover{background:rgba(255,255,255,.1)}
-      .btn-save{background:rgba(168,230,25,.15);border-color:rgba(168,230,25,.3);color:#a8e619}
-      .btn-save:hover{background:rgba(168,230,25,.25)}
-      .btn-cancel{color:rgba(255,255,255,.5)}
-      .save-status{font-size:11px;color:#a8e619;margin-left:8px}
-      .vault-select{padding:4px 10px;border-radius:6px;border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.06);color:#e5e5e5;font-size:12px;font-weight:600;cursor:pointer;outline:none}
-      .vault-select option{background:#1a1a2e;color:#e5e5e5}
-      strong{font-weight:700}em{font-style:italic}del{opacity:.5;text-decoration:line-through}
+      .om-code-block{background:color-mix(in srgb, var(--color-background, #05090a) 60%, transparent);border:1px solid var(--color-border, rgba(255,255,255,.08));border-radius:var(--radius, .5rem);padding:12px 14px;margin:10px 0;overflow-x:auto;font-size:12px;line-height:1.5;font-family:var(--font-mono, ui-monospace, monospace)}
+      .om-code-block code{color:var(--color-foreground, #e5e5e5)}
+      .om-code-block::before{content:attr(data-lang);display:block;font-size:10px;color:var(--color-muted-foreground, rgba(255,255,255,.4));text-transform:uppercase;margin-bottom:6px}
+      .om-table{width:100%;border-collapse:collapse;margin:10px 0;font-size:13px}
+      .om-table th{text-align:left;padding:6px 10px;border-bottom:2px solid var(--color-border, rgba(255,255,255,.15));color:var(--color-muted-foreground, rgba(255,255,255,.7));font-weight:600}
+      .om-table td{padding:5px 10px;border-bottom:1px solid var(--color-border, rgba(255,255,255,.06))}
+      .om-table tr:hover td{background:color-mix(in srgb, var(--color-primary, #a8e619) 6%, transparent)}
+      .om-h1{font-size:22px;font-weight:700;margin:16px 0 8px}
+      .om-h2{font-size:18px;font-weight:700;margin:14px 0 6px}
+      .om-h3{font-size:15px;font-weight:700;margin:12px 0 4px}
+      .om-h4,.om-h5,.om-h6{font-size:13px;font-weight:600;margin:10px 0 4px;opacity:.85}
+      .om-hr{border:none;border-top:1px solid var(--color-border, rgba(255,255,255,.1));margin:16px 0}
+      .om-callout{background:color-mix(in srgb, var(--color-primary, #a8e619) 8%, transparent);border-left:3px solid var(--color-primary, #a8e619);border-radius:0 6px 6px 0;padding:8px 12px;margin:10px 0}
+      .om-quote{border-left:2px solid var(--color-border, rgba(255,255,255,.2));padding-left:10px;margin:4px 0;color:var(--color-muted-foreground, rgba(255,255,255,.65));font-style:italic}
+      .om-check{display:flex;align-items:center;gap:8px;margin:3px 0;font-size:13px}
+      .om-check-box{width:16px;height:16px;border:1.5px solid var(--color-border, rgba(255,255,255,.25));border-radius:3px;display:inline-flex;align-items:center;justify-content:center;font-size:11px;flex-shrink:0}
+      .om-check-box.om-checked{background:var(--color-primary, #a8e619);border-color:var(--color-primary, #a8e619);color:var(--color-primary-foreground, #000)}
+      .om-img{max-width:100%;border-radius:6px;margin:8px 0}
+      .om-wikilink{color:var(--color-accent, #60a5fa);cursor:pointer;text-decoration:none;border-bottom:1px dashed color-mix(in srgb, var(--color-accent, #60a5fa) 40%, transparent);border-bottom-width:1px}
+      .om-wikilink:hover{text-decoration:none;border-bottom-style:solid}
+      .om-link{color:var(--color-primary, #a8e619);text-decoration:none}
+      .om-link:hover{text-decoration:underline}
+      .om-inline-code{background:color-mix(in srgb, var(--color-foreground, #fff) 10%, transparent);padding:1px 5px;border-radius:3px;font-size:12px;font-family:var(--font-mono, ui-monospace, monospace)}
+      .om-ul,.om-ol{margin:4px 0 4px 20px}
+      .om-li,.om-oli{margin:2px 0;font-size:13px}
+      .om-p{margin:4px 0}
+      .om-note-edit{width:100%;min-height:300px;background:var(--color-background, #05090a);border:1px solid var(--color-border, rgba(255,255,255,.15));border-radius:var(--radius, .5rem);padding:12px;color:var(--color-foreground, #e5e5e5);font-family:var(--font-mono, ui-monospace, monospace);font-size:13px;line-height:1.6;resize:vertical;outline:none}
+      .om-note-edit:focus{border-color:var(--color-primary, #a8e619);box-shadow:0 0 0 2px color-mix(in srgb, var(--color-ring, #60a5fa) 30%, transparent)}
+      .om-edit-bar{display:flex;gap:6px;margin-bottom:8px;align-items:center}
+      .om-btn{padding:4px 12px;border-radius:var(--radius, .5rem);border:1px solid var(--color-border, rgba(255,255,255,.15));background:var(--color-muted, rgba(255,255,255,.06));color:var(--color-foreground, #e5e5e5);cursor:pointer;font-size:12px;font-weight:600}
+      .om-btn:hover{background:color-mix(in srgb, var(--color-foreground, #fff) 10%, transparent)}
+      .om-btn-save{background:color-mix(in srgb, var(--color-primary, #a8e619) 15%, transparent);border-color:color-mix(in srgb, var(--color-primary, #a8e619) 30%, transparent);color:var(--color-primary, #a8e619)}
+      .om-btn-cancel{color:var(--color-muted-foreground, rgba(255,255,255,.5))}
+      .om-save-status{font-size:11px;color:var(--color-primary, #a8e619);margin-left:8px}
+      .om-save-status.om-error{color:var(--color-destructive, #ff6b6b)}
+      .om-vault-select{padding:4px 10px;border-radius:var(--radius, .5rem);border:1px solid var(--color-border, rgba(255,255,255,.15));background:var(--color-muted, rgba(255,255,255,.06));color:var(--color-foreground, #e5e5e5);font-size:12px;font-weight:600;cursor:pointer;outline:none}
+      .om-vault-select option{background:var(--color-popover, #1a1a2e);color:var(--color-popover-foreground, #e5e5e5)}
     `;
     document.head.appendChild(s);
   }
@@ -421,6 +483,7 @@
     const [editing, setEditing] = useState(false);
     const [editText, setEditText] = useState("");
     const [saveStatus, setSaveStatus] = useState("");
+    const [error, setError] = useState("");
 
     useEffect(() => { injectStyles(); }, []);
 
@@ -428,8 +491,18 @@
     useEffect(() => {
       fetchJSON(BASE + "/vaults").then(v => {
         setVaults(v);
-        if (v.length > 0 && !currentVault) setCurrentVault(v[0].name);
-      }).catch(() => {});
+        if (v && v.length > 0) {
+          setCurrentVault(cur => cur || v[0].name);
+        } else {
+          // No vault: nothing will ever set loading false, because loadAll
+          // is gated on having a currentVault. Clear it so the empty state
+          // renders instead of an eternal "Loading vault...".
+          setLoading(false);
+        }
+      }).catch(e => {
+        setError("Could not reach the Obsidian plugin API: " + (e && e.message ? e.message : e));
+        setLoading(false);
+      });
     }, []);
 
     const loadAll = useCallback(() => {
@@ -454,9 +527,21 @@
 
     useEffect(() => {
       if (!selected || !currentVault) { setContent(null); setEditing(false); return; }
-      setEditing(false); setSaveStatus("");
+      setEditing(false); setSaveStatus(""); setError("");
       const q = "?vault=" + encodeURIComponent(currentVault);
-      fetchJSON(BASE + "/notes/" + encodeURIComponent(selected) + q).then(setContent).catch(()=>setContent(null));
+      fetchJSON(BASE + "/notes/" + encodeURIComponent(selected) + q)
+        .then(setContent)
+        .catch(e => {
+          // A bare wikilink title that several folders share comes back as a
+          // 409 with the candidate paths — show them instead of a blank pane.
+          const detail = e && e.detail;
+          if (detail && detail.candidates) {
+            setError(detail.error + " Try: " + detail.candidates.join(", "));
+          } else {
+            setError("Could not open note: " + (e && e.message ? e.message : e));
+          }
+          setContent(null);
+        });
     }, [selected, currentVault]);
 
     const filtered = useMemo(() => notes.filter(n => {
@@ -476,24 +561,31 @@
       setSaveStatus("saving...");
       try {
         const q = "?vault=" + encodeURIComponent(currentVault);
-        const res = await fetch(BASE + "/notes/" + encodeURIComponent(selected) + q, { method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify({content:editText}) });
-        if (!res.ok) throw new Error("Save failed");
-        const updated = await res.json();
+        // MUST go through fetchJSON, never a bare fetch: the plugin API routes
+        // sit behind the dashboard auth gate, and only fetchJSON attaches the
+        // session token. A raw fetch PUT silently 401s and loses the edit.
+        const updated = await fetchJSON(
+          BASE + "/notes/" + encodeURIComponent(selected) + q + "&content=" + encodeURIComponent(editText),
+          { method: "PUT" }
+        );
         setContent(updated); setEditing(false); setSaveStatus("saved"); loadAll();
         setTimeout(() => setSaveStatus(""), 2000);
-      } catch(e) { setSaveStatus("error: "+e.message); }
+      } catch(e) { setSaveStatus("error: " + e.message); setEditing(false); }
     }, [selected, currentVault, editText, loadAll]);
 
     const renderedContent = useMemo(() => content ? renderMarkdown(content.content) : "", [content]);
     const viewerRef = useRef(null);
     useEffect(() => {
       const el = viewerRef.current; if (!el) return;
-      const handler = e => { const wl = e.target.closest(".md-wikilink"); if (wl) { e.preventDefault(); handleWikilink(wl.dataset.note); } };
+      const handler = e => { const wl = e.target.closest(".om-wikilink"); if (wl) { e.preventDefault(); handleWikilink(wl.dataset.note); } };
       el.addEventListener("click", handler);
       return () => el.removeEventListener("click", handler);
     }, [renderedContent, handleWikilink]);
 
-    const fmtDate = ts => new Date(parseFloat(ts)*1000).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"});
+    const fmtDate = ts => {
+      const d = new Date((Number(ts) || 0) * 1000);
+      return Number.isNaN(d.getTime()) ? "" : d.toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"});
+    };
     const contentStyle = view === "graph"
       ? { display: "flex", gap: 14, height: "calc(100vh - 200px)", minHeight: 0 }
       : { display: "flex", gap: 14, minHeight: 400 };
@@ -504,7 +596,7 @@
         React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12 } },
           React.createElement("h1", { style: { fontSize: 20, fontWeight: 700, margin: 0 } }, "Obsidian Memory"),
           vaults.length > 1 && React.createElement("select", {
-            className: "vault-select",
+            className: "om-vault-select",
             value: currentVault || "",
             onChange: e => {
               setCurrentVault(e.target.value); setSelected(null); setContent(null); setEditing(false);
@@ -517,15 +609,15 @@
             notes.length + " notes \u00b7 " + totalWords.toLocaleString() + " words \u00b7 " + folders.length + " folders"),
           ["notes","graph"].map(v => React.createElement("button", {
             key: v, onClick: () => setView(v),
-            style: { padding: "5px 14px", borderRadius: 6, border: "1px solid "+BORDER, background: view===v?"rgba(168,230,25,.15)":SURFACE, color: view===v?ACCENT:TEXT, cursor: "pointer", fontSize: 12, fontWeight: 600 },
+            style: { padding: "5px 14px", borderRadius: 6, border: "1px solid "+BORDER, background: view===v?ACCENT_SOFT:SURFACE, color: view===v?ACCENT:TEXT, cursor: "pointer", fontSize: 12, fontWeight: 600 },
           }, v==="notes"?"Notes":"Graph"))
         )
       ),
       // Search + filters
       React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap", alignItems: "center", flexShrink: 0 } },
         React.createElement("input", { placeholder:"Search notes...", value:search, onChange:e=>setSearch(e.target.value), style:{padding:"5px 10px",borderRadius:6,border:"1px solid "+BORDER,background:SURFACE,color:TEXT,fontSize:12,width:180,outline:"none"} }),
-        folders.map(f => React.createElement("button", { key:f.name, onClick:()=>setAFolder(aFolder===f.name?null:f.name), style:{padding:"3px 8px",borderRadius:4,border:"1px solid "+BORDER,background:aFolder===f.name?"rgba(168,230,25,.12)":SURFACE,color:TEXT,cursor:"pointer",fontSize:11} }, f.name+" ("+f.count+")")),
-        tags.slice(0,8).map(t => React.createElement("button", { key:t.tag, onClick:()=>setATag(aTag===t.tag?null:t.tag), style:{padding:"3px 8px",borderRadius:4,border:"1px solid "+BORDER,background:aTag===t.tag?"rgba(96,165,250,.15)":SURFACE,color:aTag===t.tag?"#60a5fa":TEXT,cursor:"pointer",fontSize:11} }, "#"+t.tag+" ("+t.count+")"))
+        folders.map(f => React.createElement("button", { key:f.name, onClick:()=>setAFolder(aFolder===f.name?null:f.name), style:{padding:"3px 8px",borderRadius:4,border:"1px solid "+BORDER,background:aFolder===f.name?ACCENT_FAINT:SURFACE,color:aFolder===f.name?ACCENT:TEXT,cursor:"pointer",fontSize:11} }, f.name+" ("+f.count+")")),
+        tags.slice(0,8).map(t => React.createElement("button", { key:t.tag, onClick:()=>setATag(aTag===t.tag?null:t.tag), style:{padding:"3px 8px",borderRadius:4,border:"1px solid "+BORDER,background:aTag===t.tag?ACCENT_FAINT:SURFACE,color:aTag===t.tag?ACCENT:TEXT,cursor:"pointer",fontSize:11} }, "#"+t.tag+" ("+t.count+")"))
       ),
       // Content
       React.createElement("div", { style: contentStyle },
@@ -536,7 +628,7 @@
                   ? React.createElement("p", { style: { padding: 16, fontSize: 12, color: TEXT_DIM, textAlign: "center" } }, "No notes found")
                   : filtered.map(n => {
                     const noteId = n.id || n.path || n.name;
-                    return React.createElement("div", { key:noteId, onClick:()=>setSelected(noteId), style:{padding:"8px 10px",borderBottom:"1px solid "+BORDER,cursor:"pointer",background:selected===noteId?"rgba(168,230,25,.08)":"transparent",transition:"background .15s"} },
+                    return React.createElement("div", { key:noteId, onClick:()=>setSelected(noteId), style:{padding:"8px 10px",borderBottom:"1px solid "+BORDER,cursor:"pointer",background:selected===noteId?ACCENT_FAINT:"transparent",transition:"background .15s"} },
                       React.createElement("div", { style:{fontWeight:600,fontSize:12,color:selected===noteId?ACCENT:TEXT} }, n.name),
                       React.createElement("div", { style:{fontSize:10,color:TEXT_DIM,marginTop:2} }, n.folder+" \u00b7 "+n.word_count+" words \u00b7 "+n.link_count+" links"),
                       n.tags.length>0 && React.createElement("div", { style:{display:"flex",gap:3,marginTop:3,flexWrap:"wrap"} }, n.tags.slice(0,3).map(t => React.createElement("span", { key:t, style:{fontSize:9,padding:"1px 5px",border:"1px solid "+BORDER,borderRadius:3,color:TEXT_DIM} }, "#"+t)))
@@ -544,28 +636,29 @@
                   })
               ),
               React.createElement("div", { ref:viewerRef, style:{flex:1,overflow:"auto",border:"1px solid "+BORDER,borderRadius:8,padding:16,background:SURFACE} },
-                content ? React.createElement("div", null,
+                error ? React.createElement("div", { style:{display:"flex",alignItems:"center",justifyContent:"center",height:"100%",color:"var(--color-destructive, #ff6b6b)",fontSize:13,textAlign:"center",padding:20} }, error)
+                : content ? React.createElement("div", null,
                   React.createElement("div", { style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6} },
                     React.createElement("h2", { style:{fontSize:18,fontWeight:700,margin:0} }, content.name),
-                    !editing && React.createElement("button", { onClick:startEdit, className:"btn-sm" }, "\u270E Edit")
+                    !editing && React.createElement("button", { onClick:startEdit, className:"om-btn" }, "\u270E Edit")
                   ),
                   React.createElement("div", { style:{display:"flex",gap:5,marginBottom:10,flexWrap:"wrap",alignItems:"center"} },
                     React.createElement("span", { style:{fontSize:10,padding:"2px 7px",border:"1px solid "+BORDER,borderRadius:4,color:TEXT_DIM} }, content.folder),
                     React.createElement("span", { style:{fontSize:10,padding:"2px 7px",border:"1px solid "+BORDER,borderRadius:4,color:TEXT_DIM} }, content.word_count+" words"),
                     React.createElement("span", { style:{fontSize:10,color:TEXT_DIM} }, fmtDate(content.modified)),
-                    content.tags.map(t => React.createElement("span", { key:t, style:{fontSize:10,padding:"2px 7px",background:"rgba(96,165,250,.1)",borderRadius:4,color:"#60a5fa"} }, "#"+t))
+                    content.tags.map(t => React.createElement("span", { key:t, style:{fontSize:10,padding:"2px 7px",background:"color-mix(in srgb, "+LINK+" 12%, transparent)",borderRadius:4,color:LINK} }, "#"+t))
                   ),
-                  content.backlinks.length>0 && React.createElement("div", { style:{fontSize:11,color:TEXT_DIM,marginBottom:10,padding:"6px 10px",background:"rgba(255,255,255,.02)",borderRadius:6,border:"1px solid "+BORDER} },
-                    "Linked from: ", content.backlinks.map((l,i) => React.createElement("span", { key:l, style:{color:"#60a5fa",cursor:"pointer"}, onClick:()=>handleWikilink(l) }, l, i<content.backlinks.length-1?", ":""))
+                  content.backlinks.length>0 && React.createElement("div", { style:{fontSize:11,color:TEXT_DIM,marginBottom:10,padding:"6px 10px",background:SURFACE,borderRadius:6,border:"1px solid "+BORDER} },
+                    "Linked from: ", content.backlinks.map((l,i) => React.createElement("span", { key:l, title:l, style:{color:LINK,cursor:"pointer"}, onClick:()=>handleWikilink(l) }, l.split("/").pop().replace(/\.md$/, ""), i<content.backlinks.length-1?", ":""))
                   ),
                   editing
                     ? React.createElement("div", null,
-                        React.createElement("div", { className:"edit-bar" },
-                          React.createElement("button", { onClick:saveEdit, className:"btn-sm btn-save" }, "\u2713 Save"),
-                          React.createElement("button", { onClick:cancelEdit, className:"btn-sm btn-cancel" }, "Cancel"),
-                          saveStatus && React.createElement("span", { className:"save-status" }, saveStatus)
+                        React.createElement("div", { className:"om-edit-bar" },
+                          React.createElement("button", { onClick:saveEdit, className:"om-btn om-btn-save" }, "\u2713 Save"),
+                          React.createElement("button", { onClick:cancelEdit, className:"om-btn om-btn-cancel" }, "Cancel"),
+                          saveStatus && React.createElement("span", { className:"om-save-status" + (saveStatus.startsWith("error") ? " om-error" : "") }, saveStatus)
                         ),
-                        React.createElement("textarea", { className:"note-edit-area", value:editText, onChange:e=>setEditText(e.target.value), spellCheck:false })
+                        React.createElement("textarea", { className:"om-note-edit", value:editText, onChange:e=>setEditText(e.target.value), spellCheck:false })
                       )
                     : React.createElement("div", { style:{fontSize:13,lineHeight:1.7}, dangerouslySetInnerHTML:{__html:renderedContent} })
                 ) : React.createElement("div", { style:{display:"flex",alignItems:"center",justifyContent:"center",height:"100%",color:TEXT_DIM,fontSize:13,flexDirection:"column",gap:8} },
@@ -575,7 +668,13 @@
             )
           : React.createElement(GraphView, { nodes:graph.nodes, edges:graph.edges, onSelect:id=>{setSelected(id);setView("notes")}, selectedNode:selected })
       ),
-      loading && React.createElement("div", { style:{padding:32,textAlign:"center",color:TEXT_DIM,fontSize:13} }, "Loading vault...")
+      loading && React.createElement("div", { style:{padding:32,textAlign:"center",color:TEXT_DIM,fontSize:13} }, "Loading vault..."),
+      !loading && vaults.length === 0 && React.createElement("div", { style: { padding: 32, textAlign: "center", fontSize: 13, display: "flex", flexDirection: "column", gap: 8, alignItems: "center" } },
+        React.createElement("div", { style: { fontSize: 28, opacity: 0.4 } }, "📂"),
+        React.createElement("div", { style: { fontWeight: 600 } }, "No Obsidian vault found"),
+        React.createElement("div", { style: { color: TEXT_DIM, fontSize: 12, maxWidth: 460 } },
+          "Set OBSIDIAN_VAULT_PATH to your vault directory (a folder containing a .obsidian folder) in ~/.hermes/.env, then reload the dashboard.")
+      )
     );
   }
 

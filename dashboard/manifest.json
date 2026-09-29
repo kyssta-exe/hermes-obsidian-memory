@@ -1,16 +1,14 @@
 {
   "name": "obsidian-memory",
   "label": "Obsidian",
-  "description": "View and explore Obsidian vault notes with graph visualization",
-  "icon": "BookOpen",
-  "version": "1.0.0",
+  "description": "Browse, search, and edit Obsidian vault notes with graph visualization, wikilinks, and multi-vault support.",
+  "icon": "FolderOpen",
+  "version": "3.1.0",
   "tab": {
     "path": "/obsidian",
     "position": "after:skills"
   },
   "entry": "plugin.js",
   "css": null,
-  "api": "api.py",
-  "has_api": true,
-  "source": "user"
+  "api": "api.py"
 }
