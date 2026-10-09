@@ -1,23 +1,42 @@
 ## Obsidian Memory installed
 
-The **OBSIDIAN** tab is now available in your Hermes dashboard.
+Obsidian Memory is available on two surfaces — the **desktop app** and the
+**web dashboard**. Both read the same backend.
 
-### Quick Start
+### Enable it first
 
-1. Open the dashboard (`hermes dashboard`)
-2. Click the **OBSIDIAN** tab in the sidebar
-3. Your vault notes will appear automatically
+Plugins install disabled. Enable it with:
 
-### Multi-Vault
+```bash
+hermes plugins enable obsidian-memory
+```
 
-The plugin auto-discovers vaults by looking for `.obsidian` directories. If you have multiple vaults, a dropdown will appear in the header to switch between them.
+### Desktop app
 
-### Custom Vault Path
+- The **Obsidian** row appears in the sidebar, below **Artifacts**
+- ⌘K → **Open Obsidian vault**, or `⌘⌥O` / `Ctrl+Alt+O`
+- The status bar shows your vault count; click it to open the page
+- The page has a **Notes** / **Graph** toggle, search, folder and tag filters,
+  and inline editing (Edit → Save)
 
-To point to a specific vault:
+### Web dashboard
+
+Run `hermes dashboard` — the **OBSIDIAN** tab appears after **Skills**.
+
+### Multi-vault
+
+Vaults are auto-discovered by looking for `.obsidian` marker directories under
+your configured roots. With more than one vault, a dropdown appears in the
+header to switch between them.
+
+### Custom vault roots
+
+Set them in **Settings → Plugins → Obsidian Memory → Vault roots** (one
+directory per line), or via env:
 
 ```bash
 export OBSIDIAN_VAULT_PATH=/path/to/your/vault
 ```
 
-Add this to `~/.hermes/.env` to persist it.
+Add this to `~/.hermes/.env` to persist it. With no configuration, the plugin
+scans `~/Documents/Obsidian`, `~/obsidian-vaults`, and `~/vaults`.

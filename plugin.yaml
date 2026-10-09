@@ -1,6 +1,7 @@
 name: obsidian-memory
-version: 3.0.0
-description: "Browse, search, and edit Obsidian vault notes from the Hermes dashboard. Features force-directed graph visualization, multi-vault support, markdown rendering with wikilinks, and inline note editing."
+version: 4.0.0
+manifest_version: 2
+description: "Browse, search, and edit your Obsidian vault notes from Hermes — desktop pane, dashboard tab, force-directed graph, multi-vault support, markdown rendering with wikilinks, and inline editing."
 author: Kyssta
 license: MIT
 homepage: https://github.com/kyssta-exe/hermes-obsidian-memory
@@ -10,11 +11,16 @@ tags:
   - knowledge-base
   - graph
   - dashboard
+  - desktop
 provides_tools: []
+provides_hooks: []
 dependencies: []
 requires_env: []
-dashboard:
-  label: Obsidian
-  icon: BookOpen
-  path: /obsidian
-  position: after:skills
+requires_hermes: ">=0.21.0"
+python_dependencies: []
+config_schema:
+  vault_roots:
+    type: str
+    default: ""
+    label: Vault roots
+    description: "One directory per line. Any subdirectory containing a `.obsidian` marker folder is discovered as a vault; each root and its immediate children are scanned."
